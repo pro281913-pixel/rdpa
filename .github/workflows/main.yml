@@ -1,4 +1,4 @@
-name: Ultra OBS RDP (Fixed)
+name: Ultra OBS RDP (Auto-Generated Credentials)
 on:
   workflow_dispatch:
 
@@ -14,110 +14,104 @@ jobs:
           powercfg -change -standby-timeout-ac 0
           powercfg -change -monitor-timeout-ac 0
           
-          Write-Host "Installing Chocolatey Packages..."
+          Write-Host "Installing Chocolatey Packages (OBS, Chrome, VB-Cable)..."
           Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
           
-          # Install apps silently and ignore minor checksum errors
           choco install obs-studio -y --no-progress --ignore-checksums
           choco install googlechrome -y --no-progress --ignore-checksums
           choco install vb-cable -y --no-progress --ignore-checksums
 
-      - name: 🛡️ Configure Firewall & RDP
+      - name: 🛡️ Configure Firewall & RDP (From Working Reference)
         run: |
-          # Enable RDP in Registry
+          # These settings match your working "RDP" repo exactly
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          # SecurityLayer 0 fixes many connection errors
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
           
-          # Remove existing rule if exists (Error Proof)
-          try {
-            netsh advfirewall firewall delete rule name="RDP-Tailscale" *>$null
-          } catch {
-            Write-Host "Rule clean."
-          }
-
-          # Add Allow Rules
+          # Firewall Rules
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" all
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           netsh advfirewall firewall add rule name="OBS-Stream" dir=in action=allow protocol=TCP localport=1935
           
-          # Restart TermService to apply settings
           Restart-Service -Name TermService -Force
-          Write-Host "RDP Services Configured."
+          Write-Host "RDP and Firewall Configured Successfully."
 
-      - name: 👤 Create Admin User (Fixed Logic)
+      - name: 👤 Auto-Generate User & Grant Permissions
         run: |
-          $username = "TOOLBOXLAP"
-          $password = "admin@123"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          # 1. GENERATE RANDOM CREDENTIALS
+          $autoUser = "StreamUser"
+          # Generates a random 12-character password with letters and numbers + a symbol to satisfy complexity requirements
+          $randomPass = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 12 | % {[char]$_}) + "!"
+          
+          Write-Host "Generated Username: $autoUser"
+          # We save these to Environment Variables so we can print them at the end
+          echo "GEN_USER=$autoUser" >> $env:GITHUB_ENV
+          echo "GEN_PASS=$randomPass" >> $env:GITHUB_ENV
 
-          # 1. Check if user exists, Create if not, Set Password if yes
-          $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-          
-          if ($userExists) {
-              Write-Host "User $username already exists. Resetting password..."
-              Set-LocalUser -Name $username -Password $securePass
+          $securePass = ConvertTo-SecureString $randomPass -AsPlainText -Force
+
+          # 2. CREATE USER (Using your working logic: Check if exists first)
+          if (-not (Get-LocalUser -Name $autoUser -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $autoUser -Password $securePass -AccountNeverExpires -Description "Auto Generated RDP User"
+              Write-Host "User created successfully."
           } else {
-              Write-Host "Creating new user $username..."
-              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "Stream Admin"
+              Write-Host "User already exists, updating password."
+              Set-LocalUser -Name $autoUser -Password $securePass
           }
+
+          # 3. ADD TO GROUPS
+          Add-LocalGroupMember -Group "Administrators" -Member $autoUser
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $autoUser
           
-          # 2. Add to Groups (Using 'net localgroup' is more reliable in CI/CD than PowerShell cmdlets)
-          Write-Host "Adding user to Admin groups..."
-          cmd /c "net localgroup Administrators $username /add"
-          cmd /c "net localgroup 'Remote Desktop Users' $username /add"
-          
-          # 3. Verify
-          $checkAdmin = net localgroup Administrators
-          if ($checkAdmin -match $username) {
-              Write-Host "SUCCESS: User $username is fully configured." -ForegroundColor Green
-          } else {
-              Write-Error "Failed to add user to Admin group."
+          # Verify
+          if (-not (Get-LocalUser -Name $autoUser)) {
+              Write-Error "User creation failed!"
+              exit 1
           }
+          Write-Host "User setup complete."
 
       - name: 🌐 Install & Connect Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
-          Write-Host "Downloading Tailscale..."
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          
-          Write-Host "Installing Tailscale..."
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
           
-          # Connect to Tailscale
-          Write-Host "Authenticating Tailscale..."
+          # Connect
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="OBS-Stream-$env:GITHUB_RUN_ID" --accept-routes
           
-          # Get IP with Loop
+          # Get IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 20) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              if ($tsIP) { break }
               Start-Sleep -Seconds 3
               $retries++
           }
           
           if (-not $tsIP) { 
-            Write-Error "Failed to get Tailscale IP. Check your Auth Key." 
+            Write-Error "Failed to get Tailscale IP" 
             exit 1 
           }
           
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: 🟢 SUCCESS - Stream Ready
+      - name: 🟢 SUCCESS - Credentials
         run: |
           Write-Host " "
           Write-Host "=============================================" -ForegroundColor Green
           Write-Host "   STREAMING RDP IS READY TO CONNECT" -ForegroundColor Green
           Write-Host "=============================================" -ForegroundColor Green
           Write-Host "   IP Address:  $env:TAILSCALE_IP" -ForegroundColor Cyan
-          Write-Host "   Username:    TOOLBOXLAP" -ForegroundColor Yellow
-          Write-Host "   Password:    admin@123" -ForegroundColor Yellow
+          Write-Host "   Username:    $env:GEN_USER" -ForegroundColor Yellow
+          Write-Host "   Password:    $env:GEN_PASS" -ForegroundColor Yellow
           Write-Host "============================================="
+          Write-Host "   Copy these credentials to connect!"
           
-          # Keep Alive Loop
+          # Loop forever to keep instance alive
           while ($true) {
             Start-Sleep -Seconds 60
           }
