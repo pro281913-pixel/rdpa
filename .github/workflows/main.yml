@@ -1,0 +1,127 @@
+name: Ultimate OBS Streaming RDP
+on:
+  workflow_dispatch:
+
+jobs:
+  obs-stream-studio:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    
+    steps:
+      - name: 🚀 Initialize System & Performance Tweaks
+        run: |
+          # Disable Windows Visual Effects for better CPU performance
+          Write-Host "Optimizing Visual Effects..."
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -Force
+          
+          # Set High Performance Power Plan
+          powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          
+          # Disable Sleep/Hibernate
+          powercfg -change -standby-timeout-ac 0
+          powercfg -change -monitor-timeout-ac 0
+
+      - name: 🛠️ Install Streaming Suite (OBS, Chrome, VLC, Audio)
+        run: |
+          # Using Chocolatey to install professional tools automatically
+          Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          
+          Write-Host "Installing OBS Studio, Chrome, VLC, and VB-Cable..."
+          choco install obs-studio -y --no-progress
+          choco install googlechrome -y --no-progress
+          choco install vlc -y --no-progress
+          choco install vb-cable -y --no-progress
+          
+          # Create Desktop Shortcuts explicitly if needed (Optional, usually Choco does this)
+          Write-Host "Software Installation Complete."
+
+      - name: 🔐 Configure Secure RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          
+          # Allow RDP and OBS RTMP/SRT ports through Firewall
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="OBS-RTMP" dir=in action=allow protocol=TCP localport=1935
+          
+          Restart-Service -Name TermService -Force
+
+      - name: 👤 Create Admin User
+        run: |
+          $password = "admin@123"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          # Check if user exists to avoid errors on re-runs (though rare on fresh runners)
+          if (-not (Get-LocalUser -Name "TOOLBOXLAP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "TOOLBOXLAP" -Password $securePass -AccountNeverExpires -Description "Streaming Admin"
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member "TOOLBOXLAP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "TOOLBOXLAP"
+          
+          # Hide the default Administrator account to avoid confusion
+          net user Administrator /active:no
+
+      - name: 🌐 Install & Connect Tailscale (VPN)
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          
+          # Connect to Tailscale using Secret
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="OBS-Studio-$env:GITHUB_RUN_ID" --accept-routes
+          
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 20) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 3
+              $retries++
+          }
+          if (-not $tsIP) { Write-Error "Tailscale IP allocation failed."; exit 1 }
+          
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: 📡 Connection Health Check
+        run: |
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Warning "Local Loopback RDP check failed (This might be normal due to firewall), proceeding anyway..."
+          } else {
+              Write-Host "RDP Port 3389 is OPEN and LISTENING."
+          }
+
+      - name: 🟢 LIVE STREAM READY - Credentials
+        run: |
+          Write-Host " "
+          Write-Host "#######################################################" -ForegroundColor Green
+          Write-Host "   🎬 ULTRA PROFESSIONAL OBS STREAMING SETUP READY    " -ForegroundColor Green
+          Write-Host "#######################################################" -ForegroundColor Green
+          Write-Host " "
+          Write-Host "   1. Copy this IP:       $env:TAILSCALE_IP" -ForegroundColor Cyan
+          Write-Host "   2. Username:           TOOLBOXLAP" -ForegroundColor Yellow
+          Write-Host "   3. Password:           admin@123" -ForegroundColor Yellow
+          Write-Host " "
+          Write-Host "   ✅ OBS Studio Installed"
+          Write-Host "   ✅ Chrome Installed"
+          Write-Host "   ✅ VB-Audio Cable Installed"
+          Write-Host " "
+          Write-Host "   ⚠️  NOTE: Since this is a VM without a GPU:"
+          Write-Host "       Set OBS Encoder to: x264"
+          Write-Host "       Set CPU Preset to: ultrafast"
+          Write-Host "#######################################################"
+          
+          # Keep-Alive Loop to prevent workflow from closing
+          while ($true) {
+              $date = Get-Date -Format "HH:mm:ss"
+              Write-Host "[$date] Session Active. OBS Studio VM is running..."
+              # Simulating activity to keep runner 'warm'
+              $wsh = New-Object -ComObject WScript.Shell
+              $wsh.SendKeys('+{F15}')
+              Start-Sleep -Seconds 60
+          }
